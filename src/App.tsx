@@ -29,7 +29,7 @@ import {
   initAudio, resumeAudio, playMusic, stopMusic,
   sfxCast, sfxMiss, sfxFireball, sfxImpact, sfxShatter, sfxRankUp, sfxComboBreak,
   sfxPlayerHit, sfxBonfire, sfxEstus, sfxDodge, sfxBossAppear, sfxBossDefeated,
-  sfxDeath, sfxHeartbeat, whisperWord, cancelWhispers,
+  sfxDeath, sfxHeartbeat,
 } from './game/audio';
 
 import {Hud, type HudStats} from './hud/Hud';
@@ -43,6 +43,7 @@ import {BonfireInterlude, type BonfireReason} from './screens/BonfireInterlude';
 import {GameOverScreen, type HighScore} from './screens/GameOver';
 import {VictoryScreen} from './screens/Victory';
 import {SecretAskScreen, SecretLoveScreen, type SecretHeart} from './screens/SecretScreens';
+import {DevPanel} from './screens/DevPanel';
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -90,6 +91,7 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSecretAsk, setShowSecretAsk] = useState(false);
+  const [showDevPanel, setShowDevPanel] = useState(false);
   const [yesChecked, setYesChecked] = useState(false);
   const [noHoverPos, setNoHoverPos] = useState<{x: number; y: number} | null>(null);
   const [secretHearts, setSecretHearts] = useState<SecretHeart[]>([]);
@@ -220,7 +222,7 @@ export default function App() {
     });
     const idx = COMBO_RANKS.findIndex(r => r.id === rank.id);
     sfxRankUp(Math.max(0, idx));
-    window.setTimeout(() => setRankUpEvent(null), 1400);
+    window.setTimeout(() => setRankUpEvent(null), 1600);
   }, []);
 
   const resetRunState = useCallback(() => {
@@ -257,7 +259,7 @@ export default function App() {
   const enterZone = useCallback((idx: number) => {
     zoneIdxRef.current = idx;
     const zone = ZONES[idx];
-    setZoneStyling(bgStateRef.current, zone.weather, zone.tintColor);
+    setZoneStyling(bgStateRef.current, zone.weather, zone.tintColor, zone.id as BgState['zoneId']);
     zoneStartTimeRef.current = performance.now();
     zoneElapsedRef.current = 0;
     statsRef.current.zoneReached = idx;
@@ -329,7 +331,6 @@ export default function App() {
     statsRef.current.endTime = Date.now();
     sfxDeath();
     stopMusic(0.4);
-    cancelWhispers();
     setFinalSnapshot(snapshot());
     phaseRef.current = 'gameover';
     setPhase('gameover');
@@ -365,7 +366,7 @@ export default function App() {
   }, [enterZone, resetRunState]);
 
   const abandonRun = useCallback(() => {
-    stopMusic(0.2); cancelWhispers();
+    stopMusic(0.2);
     setPaused(false);
     phaseRef.current = 'menu';
     setPhase('menu');
@@ -383,6 +384,76 @@ export default function App() {
     phaseRef.current = 'menu';
     setPhase('menu');
   }, []);
+
+  // ─── Dev-mode actions ────────────────────────────────────────
+  const devJumpToZone = useCallback((idx: number) => {
+    initAudio(); resumeAudio();
+    resetRunState();
+    setShowDevPanel(false);
+    enterZone(idx);
+  }, [enterZone, resetRunState]);
+
+  const devJumpToBoss = useCallback((bossId: string) => {
+    initAudio(); resumeAudio();
+    resetRunState();
+    // Locate the zone this boss belongs to so HUD shows the right zone name.
+    const zoneIdx = Math.max(0, ZONES.findIndex(z => z.bossId === bossId));
+    zoneIdxRef.current = zoneIdx;
+    setZoneStyling(bgStateRef.current, ZONES[zoneIdx].weather, ZONES[zoneIdx].tintColor, ZONES[zoneIdx].id as BgState['zoneId']);
+    statsRef.current.zoneReached = zoneIdx;
+    setShowDevPanel(false);
+    enterBoss(bossId);
+  }, [enterBoss, resetRunState]);
+
+  const devJumpToVictory = useCallback(() => {
+    resetRunState();
+    statsRef.current.endTime = Date.now();
+    statsRef.current.bossesDefeated = 3;
+    scoreRef.current = 99999;
+    maxComboRef.current = 150;
+    zoneIdxRef.current = ZONES.length - 1;
+    setFinalSnapshot(snapshotFromRefs());
+    setShowDevPanel(false);
+    phaseRef.current = 'victory';
+    setPhase('victory');
+    playMusic('victory');
+  }, [resetRunState]);
+
+  const devHeal = useCallback(() => { healthRef.current = MAX_HEALTH; }, []);
+  const devGiveEstus = useCallback(() => { estusChargesRef.current = MAX_ESTUS; }, []);
+  const devAddCombo = useCallback((n: number) => {
+    comboRef.current += n;
+    if (comboRef.current > maxComboRef.current) maxComboRef.current = comboRef.current;
+  }, []);
+  const devKillAllWords = useCallback(() => {
+    wordsRef.current = [];
+    projectilesRef.current = [];
+    activeWordRef.current = null;
+  }, []);
+  const devTriggerLightning = useCallback(() => {
+    triggerLightning(bgStateRef.current, performance.now());
+  }, []);
+
+  // Keyboard shortcut: backtick (`) opens the dev gate from the menu.
+  useEffect(() => {
+    if (phase !== 'menu') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === '`' || e.key === '~') { e.preventDefault(); setShowDevPanel(true); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase]);
+
+  // snapshot helper that reads from refs (for dev victory jump)
+  function snapshotFromRefs(): FinalSnapshot {
+    return {
+      score: scoreRef.current,
+      maxCombo: maxComboRef.current,
+      topRank: rankForCombo(maxComboRef.current),
+      stats: {...statsRef.current, comboOverTime: [...statsRef.current.comboOverTime]},
+      zoneName: ZONES[zoneIdxRef.current]?.name ?? ZONES[0].name,
+    };
+  }
 
   const runAway = (e?: React.MouseEvent | React.TouchEvent) => {
     if (e) { e.preventDefault(); e.stopPropagation(); }
@@ -496,6 +567,7 @@ export default function App() {
     phase, paused, scale, settings,
     showSettings, setShowSettings,
     showSecretAsk, setShowSecretAsk,
+    showDevPanel, setShowDevPanel,
     yesChecked, setYesChecked, noHoverPos, runAway,
     secretHearts, setSecretHearts, kissPos, setKissPos,
     secretPassword, setSecretPassword, passwordError, setPasswordError,
@@ -505,6 +577,8 @@ export default function App() {
     smoochAudioRef,
     startRun, abandonRun, tryAgain, advanceFromBonfire,
     handleChar, setIsMobileFocused, setPaused,
+    devJumpToZone, devJumpToBoss, devJumpToVictory,
+    devHeal, devGiveEstus, devAddCombo, devKillAllWords, devTriggerLightning,
   });
 }
 
@@ -796,12 +870,17 @@ function updateZoneSpawn(d: LoopDeps, time: number, dt: number): void {
   const kdef = ENEMY_KINDS[kind];
   const [minL, maxL] = kdef.lengthRange ?? zone.wordLength;
 
-  // Choose the word text.
+  // Choose the word text. Enforce: no two words on screen may share a first letter.
+  const usedFirstLetters = new Set(d.wordsRef.current.map(w => w.text[0]));
+
   let text: string;
   if (kind === 'caster') {
-    const casters = CASTER_WORDS.filter(w => !d.wordsRef.current.some(ex => ex.text === w));
-    text = casters.length > 0 ? casters[Math.floor(Math.random() * casters.length)]
-                              : pickWord(minL, maxL, d.wordsRef.current, d.lastWordsRef.current);
+    const casters = CASTER_WORDS.filter(w =>
+      !d.wordsRef.current.some(ex => ex.text === w) &&
+      !usedFirstLetters.has(w[0]),
+    );
+    if (casters.length === 0) return;
+    text = casters[Math.floor(Math.random() * casters.length)];
   } else {
     text = pickWord(minL, maxL, d.wordsRef.current, d.lastWordsRef.current);
     if (!text) return;
@@ -810,9 +889,12 @@ function updateZoneSpawn(d: LoopDeps, time: number, dt: number): void {
   d.totalWordsSpawnedRef.current += 1;
   let isSpecial = false;
   if (d.totalWordsSpawnedRef.current === 5 || (d.totalWordsSpawnedRef.current > 5 && Math.random() < 0.08)) {
-    text = 'JESSYKA';
-    isSpecial = true;
-    kind = 'normal';
+    // Only swap to JESSYKA if 'J' isn't already taken by another word.
+    if (!usedFirstLetters.has('J')) {
+      text = 'JESSYKA';
+      isSpecial = true;
+      kind = 'normal';
+    }
   }
 
   const newX = Math.random() * (DESIGN_W - 200);
@@ -838,8 +920,6 @@ function updateZoneSpawn(d: LoopDeps, time: number, dt: number): void {
     last.y = 80 + Math.random() * 40;
     last.speed = 0;
   }
-
-  whisperWord(text, time);
 }
 
 function pickWord(minL: number, maxL: number, existing: Word[], last: string[]): string {
@@ -1300,13 +1380,20 @@ function handleCharLive(d: LoopDeps, rawChar: string): void {
         progressed = true;
         spawnFireball(d, w);
         if (w.typed === w.text) completeWord(d, w, d.activeWordRef.current, now);
+      } else if (deflectedAny) {
+        // Neutral: parried a projectile, active word untouched.
+        d.correctKeyRef.current += 1;
+        d.statsRef.current.correctLetters += 1;
+        d.comboRef.current += 1;
+        progressed = true;
       } else {
         registerWrong(d.statsRef.current, char);
         sfxMiss();
         d.comboRef.current = 0;
       }
     }
-  } else {
+  } else if (!deflectedAny) {
+    // Only start a new word if the keystroke wasn't consumed by a deflection.
     const idx = words.findIndex(w => w.text.startsWith(char));
     if (idx !== -1) {
       const w = words[idx];
@@ -1318,11 +1405,17 @@ function handleCharLive(d: LoopDeps, rawChar: string): void {
       progressed = true;
       spawnFireball(d, w);
       if (w.typed === w.text) completeWord(d, w, idx, now);
-    } else if (!deflectedAny) {
+    } else {
       registerWrong(d.statsRef.current, char);
       sfxMiss();
       d.comboRef.current = 0;
     }
+  } else {
+    // Deflection happened; count the keystroke as correct work.
+    d.correctKeyRef.current += 1;
+    d.statsRef.current.correctLetters += 1;
+    d.comboRef.current += 1;
+    progressed = true;
   }
 
   if (progressed) {
@@ -1378,8 +1471,13 @@ function completeWord(d: LoopDeps, w: Word, idx: number, now: number): void {
 
   // Lich children on death.
   if (w.kind === 'lich') {
+    const used = new Set(d.wordsRef.current.map(ww => ww.text[0]));
+    used.add(w.text[0]);
     for (let i = 0; i < 2; i++) {
-      const childText = GOTHIC_WORDS.find(x => x.length >= 3 && x.length <= 5 && x[0] !== w.text[0]) ?? 'ECHO';
+      const candidates = GOTHIC_WORDS.filter(x => x.length >= 3 && x.length <= 5 && !used.has(x[0]));
+      if (candidates.length === 0) break;
+      const childText = candidates[Math.floor(Math.random() * candidates.length)];
+      used.add(childText[0]);
       d.wordsRef.current.push({
         text: childText, x: w.x + (i === 0 ? -40 : 40), y: w.y + 10,
         speed: 0.3, typed: '', kind: 'normal', isSpecial: false,
@@ -1414,6 +1512,8 @@ type RenderProps = {
   setShowSettings: (v: boolean) => void;
   showSecretAsk: boolean;
   setShowSecretAsk: (v: boolean) => void;
+  showDevPanel: boolean;
+  setShowDevPanel: (v: boolean) => void;
   yesChecked: boolean;
   setYesChecked: (v: boolean) => void;
   noHoverPos: {x: number; y: number} | null;
@@ -1448,6 +1548,14 @@ type RenderProps = {
   handleChar: (c: string) => void;
   setIsMobileFocused: (v: boolean) => void;
   setPaused: React.Dispatch<React.SetStateAction<boolean>>;
+  devJumpToZone: (idx: number) => void;
+  devJumpToBoss: (id: string) => void;
+  devJumpToVictory: () => void;
+  devHeal: () => void;
+  devGiveEstus: () => void;
+  devAddCombo: (n: number) => void;
+  devKillAllWords: () => void;
+  devTriggerLightning: () => void;
 };
 
 function renderAppTree(p: RenderProps) {
@@ -1536,6 +1644,7 @@ function renderAppTree(p: RenderProps) {
           <MenuScreen
             onStart={p.startRun}
             onOpenSettings={() => p.setShowSettings(true)}
+            onOpenDev={() => p.setShowDevPanel(true)}
           />
         )}
 
@@ -1612,6 +1721,21 @@ function renderAppTree(p: RenderProps) {
 
         {/* Settings overlay */}
         {p.showSettings && <SettingsScreen onClose={() => p.setShowSettings(false)} />}
+
+        {/* Dev panel overlay */}
+        {p.showDevPanel && (
+          <DevPanel
+            onClose={() => p.setShowDevPanel(false)}
+            jumpToZone={p.devJumpToZone}
+            jumpToBoss={p.devJumpToBoss}
+            jumpToVictory={p.devJumpToVictory}
+            heal={p.devHeal}
+            giveEstus={p.devGiveEstus}
+            addCombo={p.devAddCombo}
+            killAllWords={p.devKillAllWords}
+            triggerLightning={p.devTriggerLightning}
+          />
+        )}
       </div>
 
       {p.kissPos && (

@@ -30,8 +30,6 @@ export function SettingsScreen({onClose}: SettingsScreenProps) {
           <Slider label="Master" value={settings.volumeMaster} onChange={v => patch({volumeMaster: v})} />
           <Slider label="Music" value={settings.volumeMusic} onChange={v => patch({volumeMusic: v})} />
           <Slider label="Effects" value={settings.volumeSfx} onChange={v => patch({volumeSfx: v})} />
-          <Slider label="Whispers" value={settings.volumeVoice} onChange={v => patch({volumeVoice: v})} />
-          <Toggle label="Enable whispers" value={settings.whispers} onChange={v => patch({whispers: v})} />
         </section>
 
         <section className="mb-6">

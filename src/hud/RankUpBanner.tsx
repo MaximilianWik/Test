@@ -1,13 +1,15 @@
 /**
- * RankUpBanner — large center-screen announcement when combo rank advances.
- * Respects reduce-motion from settings (shorter, static).
+ * RankUpBanner — a small toast-style announcement that slides in on the left,
+ * tucked just under the HUD zone/combo block. Non-blocking, fades quickly.
+ * Respects reduce-motion (static fade only).
  */
 
 import {memo} from 'react';
+import type {CSSProperties} from 'react';
 
 export type RankUpEvent = {
-  id: number;                 // unique per fire so React can re-mount
-  rankId: string;             // D..SSS
+  id: number;
+  rankId: string;
   label: string;
   color: string;
   timestamp: number;
@@ -22,27 +24,19 @@ export function rankColor(id: string): string { return RANK_COLORS[id] ?? '#ff77
 
 export const RankUpBanner = memo(function RankUpBanner({event, reduceMotion}: {event: RankUpEvent | null; reduceMotion: boolean}) {
   if (!event) return null;
+  const animClass = reduceMotion ? 'rank-toast-static' : 'rank-toast-slide';
   return (
     <div
       key={event.id}
-      className={`absolute top-[42%] left-0 right-0 z-[55] pointer-events-none text-center ${
-        reduceMotion ? 'rank-up-static' : 'rank-up-sweep'
-      }`}
+      className={`absolute left-8 top-[320px] z-[55] pointer-events-none ${animClass}`}
+      style={{'--rank-color': event.color} as unknown as CSSProperties}
     >
-      <div
-        className="font-[Cinzel] font-bold text-[64px] md:text-[88px] tracking-[0.25em] uppercase"
-        style={{
-          color: event.color,
-          textShadow: `0 0 30px ${event.color}, 0 0 8px rgba(0,0,0,0.9)`,
-        }}
-      >
-        {event.label}
-      </div>
-      <div
-        className="font-[Cinzel] text-sm tracking-[0.4em] opacity-70 uppercase"
-        style={{color: event.color}}
-      >
-        Rank {event.rankId}
+      <div className="rank-toast">
+        <span className="rank-toast-bar" aria-hidden />
+        <div className="flex flex-col leading-tight">
+          <span className="rank-toast-sub">Rank {event.rankId}</span>
+          <span className="rank-toast-label">{event.label}</span>
+        </div>
       </div>
     </div>
   );

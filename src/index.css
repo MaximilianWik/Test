@@ -223,13 +223,49 @@
   }
 
   /* ═══════════════════════════════════════════════════════════ */
-  /* Rank-up banner                                              */
+  /* Rank-up toast                                               */
   /* ═══════════════════════════════════════════════════════════ */
-  .rank-up-sweep {
-    animation: rankUpSweep 1.4s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+  .rank-toast {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px 8px 10px;
+    background: linear-gradient(90deg, rgba(10,6,10,0.92) 0%, rgba(20,10,14,0.75) 100%);
+    border: 1px solid var(--rank-color, #ff7744);
+    box-shadow: 0 0 18px color-mix(in srgb, var(--rank-color, #ff7744) 55%, transparent), inset 0 0 18px rgba(0,0,0,0.6);
+    backdrop-filter: blur(2px);
   }
-  .rank-up-static {
-    animation: rankUpStatic 1.2s ease-out forwards;
+  .rank-toast-bar {
+    display: inline-block;
+    width: 3px;
+    height: 28px;
+    background: var(--rank-color, #ff7744);
+    box-shadow: 0 0 10px var(--rank-color, #ff7744);
+  }
+  .rank-toast-sub {
+    font-family: 'Cinzel', serif;
+    font-size: 9px;
+    letter-spacing: 0.4em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--rank-color, #ff7744) 80%, white 0%);
+    opacity: 0.7;
+  }
+  .rank-toast-label {
+    font-family: 'Cinzel', serif;
+    font-weight: 700;
+    font-size: 18px;
+    letter-spacing: 0.12em;
+    color: var(--rank-color, #ff7744);
+    text-shadow: 0 0 12px color-mix(in srgb, var(--rank-color, #ff7744) 60%, transparent);
+  }
+  .rank-toast-slide {
+    animation: rankToastSlide 1.5s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  .rank-toast-static {
+    animation: rankToastStatic 1.4s ease-out forwards;
+    opacity: 0;
   }
 
   /* ═══════════════════════════════════════════════════════════ */
@@ -374,16 +410,16 @@
       opacity: 1;
     }
   }
-  @keyframes rankUpSweep {
-    0%   { opacity: 0; transform: translateX(-60%) scale(0.85) skewX(-8deg); letter-spacing: 0.05em; filter: blur(10px); }
-    20%  { opacity: 1; transform: translateX(0)    scale(1.06) skewX(0);     letter-spacing: 0.28em; filter: blur(0); }
-    75%  { opacity: 1; transform: translateX(0)    scale(1.0)  skewX(0);     letter-spacing: 0.28em; filter: blur(0); }
-    100% { opacity: 0; transform: translateX(60%)  scale(0.95) skewX(8deg);  letter-spacing: 0.35em; filter: blur(6px); }
+  @keyframes rankToastSlide {
+    0%   { opacity: 0; transform: translateX(-26px); filter: blur(6px); }
+    15%  { opacity: 1; transform: translateX(0);     filter: blur(0); }
+    75%  { opacity: 1; transform: translateX(0);     filter: blur(0); }
+    100% { opacity: 0; transform: translateX(8px);   filter: blur(2px); }
   }
-  @keyframes rankUpStatic {
+  @keyframes rankToastStatic {
     0%   { opacity: 0; }
     20%  { opacity: 1; }
-    85%  { opacity: 1; }
+    80%  { opacity: 1; }
     100% { opacity: 0; }
   }
   @keyframes raysSweep {

@@ -10,24 +10,20 @@ export type Settings = {
   volumeMaster: number;    // 0..1
   volumeMusic: number;     // 0..1
   volumeSfx: number;       // 0..1
-  volumeVoice: number;     // 0..1 (whispers)
   reduceMotion: boolean;   // disable shake, rank-up sweep, zoom
   highContrast: boolean;   // brighter text, no bg blur
   colorblind: boolean;     // swap red/green → red/blue
   fontScale: number;       // 0.8 | 1.0 | 1.2
-  whispers: boolean;       // enable Web Speech whispers
 };
 
 const DEFAULTS: Settings = {
   volumeMaster: 0.7,
   volumeMusic: 0.4,
   volumeSfx: 0.8,
-  volumeVoice: 0.35,
   reduceMotion: false,
   highContrast: false,
   colorblind: false,
   fontScale: 1.0,
-  whispers: true,
 };
 
 const KEY = 'abyss_settings_v1';

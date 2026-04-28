@@ -1,15 +1,15 @@
 /**
- * Procedural audio system.
+ * Procedural audio system — Bloodborne-inspired.
  *
- * All SFX are synthesized via Web Audio (oscillators + noise buffers + filters +
- * envelopes), so no audio asset files are needed. The smooch.mp3 easter-egg stays
- * outside this system.
+ * Everything is synthesized via Web Audio (oscillators + noise buffers +
+ * biquad filters + a shared convolution "cathedral" reverb). No audio assets.
  *
- * Music is a layered drone — two detuned sawtooth oscillators through a low-pass
- * + slow LFO on cutoff. Each zone picks its own base pitch and filter sweep.
- *
- * Whispers use the Web Speech API with low pitch + rate, rate-limited so the
- * scene doesn't become cacophonous.
+ * Aesthetic targets:
+ *   • sub-bass rumbles instead of game-y "pew"s
+ *   • detuned dissonant intervals (tritone, minor 2nd) for menace
+ *   • long decaying tails via the cathedral reverb bus
+ *   • dry filtered noise textures for wet-organic impacts
+ *   • minor-key tonality throughout
  */
 
 import {getSettings, subscribeSettings} from './settings';
@@ -17,6 +17,7 @@ import {getSettings, subscribeSettings} from './settings';
 type MusicLayer = {
   osc1: OscillatorNode;
   osc2: OscillatorNode;
+  osc3: OscillatorNode;      // dissonant third voice
   lfo: OscillatorNode;
   filter: BiquadFilterNode;
   gain: GainNode;
@@ -26,13 +27,14 @@ let ctx: AudioContext | null = null;
 let masterGain: GainNode | null = null;
 let musicGain: GainNode | null = null;
 let sfxGain: GainNode | null = null;
+let reverbBus: ConvolverNode | null = null;       // cathedral-length IR
+let reverbReturn: GainNode | null = null;         // wet return to master
 let noiseBuffer: AudioBuffer | null = null;
 let activeMusic: MusicLayer | null = null;
 let currentMusicId: string | null = null;
-let lastWhisperAt = 0;
 let lastHeartbeatAt = 0;
 
-/** Lazy-init the audio graph on first user gesture (browsers require it). */
+/** Lazy-init the audio graph on first user gesture. */
 export function initAudio(): void {
   if (ctx) return;
   try {
@@ -41,11 +43,18 @@ export function initAudio(): void {
     masterGain = ctx.createGain();
     musicGain = ctx.createGain();
     sfxGain = ctx.createGain();
+    reverbReturn = ctx.createGain();
+    reverbReturn.gain.value = 0.35;
+    reverbBus = ctx.createConvolver();
+    reverbBus.buffer = makeReverbImpulse(ctx, 3.5, 2.2);
     musicGain.connect(masterGain);
     sfxGain.connect(masterGain);
+    sfxGain.connect(reverbBus);
+    reverbBus.connect(reverbReturn);
+    reverbReturn.connect(masterGain);
     masterGain.connect(ctx.destination);
     applyVolumes();
-    // Build a 2-second white-noise buffer for whooshes/shatters.
+    // 2-second white-noise buffer reused for all noise-based SFX.
     const len = ctx.sampleRate * 2;
     const buf = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buf.getChannelData(0);
@@ -57,6 +66,21 @@ export function initAudio(): void {
   subscribeSettings(applyVolumes);
 }
 
+/** Build a cathedral-like reverb IR: exponential decay, slight diffusion. */
+function makeReverbImpulse(ctx: AudioContext, seconds: number, decay: number): AudioBuffer {
+  const rate = ctx.sampleRate;
+  const length = Math.floor(rate * seconds);
+  const buf = ctx.createBuffer(2, length, rate);
+  for (let c = 0; c < 2; c++) {
+    const data = buf.getChannelData(c);
+    for (let i = 0; i < length; i++) {
+      const t = i / length;
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, decay);
+    }
+  }
+  return buf;
+}
+
 function applyVolumes(): void {
   if (!ctx || !masterGain || !musicGain || !sfxGain) return;
   const s = getSettings();
@@ -66,202 +90,291 @@ function applyVolumes(): void {
   sfxGain.gain.setTargetAtTime(s.volumeSfx, now, 0.05);
 }
 
-/** Force-resume if a browser suspended the context (some mobiles). */
 export function resumeAudio(): void {
   if (!ctx) initAudio();
   if (ctx && ctx.state === 'suspended') void ctx.resume();
 }
 
 // ─────────────────────────────────────────────────────────────
-// Synth helpers
+// Synth primitives
 // ─────────────────────────────────────────────────────────────
 
-function envGain(attack: number, decay: number, sustain: number, release: number, peak: number): GainNode {
+type SynthTarget = 'sfx' | 'dry';   // dry = no reverb send (for dry rustles)
+
+function destFor(target: SynthTarget): GainNode | null {
+  return target === 'dry' ? masterGain : sfxGain;
+}
+
+/** Attack/decay/sustain/release envelope gain node — short-form. */
+function env(a: number, d: number, s: number, r: number, peak: number): GainNode {
   if (!ctx) throw new Error('audio not initialized');
   const g = ctx.createGain();
-  const now = ctx.currentTime;
-  g.gain.setValueAtTime(0, now);
-  g.gain.linearRampToValueAtTime(peak, now + attack);
-  g.gain.linearRampToValueAtTime(peak * sustain, now + attack + decay);
-  g.gain.linearRampToValueAtTime(0, now + attack + decay + release);
+  const t = ctx.currentTime;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(peak, t + a);
+  g.gain.linearRampToValueAtTime(peak * s, t + a + d);
+  g.gain.linearRampToValueAtTime(0, t + a + d + r);
   return g;
 }
 
-function playNoise(duration: number, filterType: BiquadFilterType, freq: number, q: number, peak: number): void {
-  if (!ctx || !noiseBuffer || !sfxGain) return;
+/** Exponential decay envelope — useful for bells, gongs, heavy impacts. */
+function expDecay(duration: number, peak: number): GainNode {
+  if (!ctx) throw new Error('audio not initialized');
+  const g = ctx.createGain();
+  const t = ctx.currentTime;
+  g.gain.setValueAtTime(peak, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+  return g;
+}
+
+function noise(duration: number, filter: BiquadFilterType, freq: number, q: number, peak: number, target: SynthTarget = 'sfx'): void {
+  if (!ctx || !noiseBuffer) return;
+  const dst = destFor(target); if (!dst) return;
   const src = ctx.createBufferSource();
   src.buffer = noiseBuffer;
   src.loop = true;
-  const filter = ctx.createBiquadFilter();
-  filter.type = filterType;
-  filter.frequency.value = freq;
-  filter.Q.value = q;
-  const g = envGain(0.005, duration * 0.3, 0.2, duration * 0.7, peak);
-  src.connect(filter).connect(g).connect(sfxGain);
+  const f = ctx.createBiquadFilter();
+  f.type = filter;
+  f.frequency.value = freq;
+  f.Q.value = q;
+  const g = expDecay(duration, peak);
+  src.connect(f).connect(g).connect(dst);
   src.start();
   src.stop(ctx.currentTime + duration + 0.05);
 }
 
-function playTone(freq: number, duration: number, type: OscillatorType, peak: number, glideTo?: number): void {
-  if (!ctx || !sfxGain) return;
+function tone(freq: number, duration: number, type: OscillatorType, peak: number, target: SynthTarget = 'sfx', glideTo?: number): OscillatorNode | null {
+  if (!ctx) return null;
+  const dst = destFor(target); if (!dst) return null;
   const osc = ctx.createOscillator();
   osc.type = type;
   osc.frequency.setValueAtTime(freq, ctx.currentTime);
-  if (glideTo !== undefined) {
-    osc.frequency.exponentialRampToValueAtTime(Math.max(10, glideTo), ctx.currentTime + duration);
-  }
-  const g = envGain(0.005, duration * 0.2, 0.3, duration * 0.8, peak);
+  if (glideTo !== undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(20, glideTo), ctx.currentTime + duration);
+  const g = expDecay(duration, peak);
+  osc.connect(g).connect(dst);
+  osc.start();
+  osc.stop(ctx.currentTime + duration + 0.05);
+  return osc;
+}
+
+/** Sub-bass body thud — the Bloodborne heartbeat. */
+function subThud(freq: number, duration: number, peak: number): void {
+  if (!ctx || !sfxGain) return;
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(freq * 2.2, ctx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(freq, ctx.currentTime + duration * 0.8);
+  const g = expDecay(duration, peak);
   osc.connect(g).connect(sfxGain);
   osc.start();
   osc.stop(ctx.currentTime + duration + 0.05);
 }
 
 // ─────────────────────────────────────────────────────────────
-// SFX catalog
+// SFX catalog — reworked for dark/eerie Bloodborne vibes.
 // ─────────────────────────────────────────────────────────────
 
-/** Soft flame whoosh on a correct keystroke; pitch rises with combo. */
+/** Keystroke cast — a breathy, spectral exhale. Tiny, non-musical. */
 export function sfxCast(combo: number): void {
   if (!ctx) return;
-  const base = 420 + Math.min(combo, 180) * 3;
-  playNoise(0.08, 'bandpass', base, 4, 0.22);
+  // Short airy noise burst, slight upward bandpass sweep as combo grows.
+  const freq = 520 + Math.min(combo, 180) * 2.2;
+  noise(0.07, 'bandpass', freq, 6, 0.18, 'dry');
 }
 
-/** Short glass-crack on a wrong keystroke. */
+/** Missed keystroke — dry metallic flinch, no reverb. */
 export function sfxMiss(): void {
   if (!ctx) return;
-  playNoise(0.12, 'highpass', 2800, 1, 0.18);
-  playTone(220, 0.06, 'triangle', 0.1, 120);
+  noise(0.09, 'highpass', 3600, 0.8, 0.12, 'dry');
+  tone(180, 0.05, 'square', 0.08, 'dry', 90);
 }
 
-/** Fireball launch. */
+/** Fireball launch — dark exhaling rush, wet. */
 export function sfxFireball(): void {
-  playNoise(0.18, 'bandpass', 900, 2.5, 0.35);
+  noise(0.25, 'bandpass', 620, 3, 0.22);
+  tone(110, 0.18, 'sine', 0.2, 'sfx', 60);
 }
 
-/** Impact boom when fireball lands. */
+/** Impact — sub thud + low noise body + detuned harmonic. */
 export function sfxImpact(big: boolean): void {
-  playTone(big ? 80 : 140, big ? 0.25 : 0.15, 'sine', big ? 0.7 : 0.45, big ? 40 : 80);
-  playNoise(big ? 0.18 : 0.12, 'lowpass', big ? 350 : 600, 1, big ? 0.3 : 0.22);
+  subThud(big ? 48 : 72, big ? 0.35 : 0.2, big ? 0.85 : 0.55);
+  noise(big ? 0.28 : 0.18, 'lowpass', big ? 420 : 620, 1.2, big ? 0.32 : 0.22);
+  // Dissonant harmonic ping.
+  if (big) tone(116, 0.22, 'triangle', 0.18);
 }
 
-/** Word destroyed (ethereal shatter). */
+/** Word banished — glass-like shatter with echoing reverb tail. */
 export function sfxShatter(): void {
-  playNoise(0.25, 'highpass', 3200, 0.8, 0.25);
-  playTone(880, 0.18, 'triangle', 0.18, 1760);
+  noise(0.28, 'highpass', 3400, 0.6, 0.22);
+  tone(780, 0.12, 'triangle', 0.14, 'sfx', 1560);
+  tone(932, 0.18, 'triangle', 0.10);   // minor 2nd harmonic for dissonance
 }
 
-/** Combo rank-up bell. */
+/** Rank-up — deep church bell struck once, rich harmonic stack. */
 export function sfxRankUp(rankIdx: number): void {
   if (!ctx || !sfxGain) return;
-  const base = 330 * Math.pow(1.122, rankIdx);
-  for (const mul of [1, 2, 3]) {
+  const base = 164 * Math.pow(1.12, rankIdx);   // low, heavy
+  // Harmonic series with inharmonic bell ratios.
+  const ratios = [1.0, 2.0, 2.76, 4.2, 5.4];
+  const amps   = [0.35, 0.2,  0.14, 0.09, 0.05];
+  for (let i = 0; i < ratios.length; i++) {
     const osc = ctx.createOscillator();
     osc.type = 'sine';
-    osc.frequency.value = base * mul;
-    const g = envGain(0.003, 0.25, 0.4, 1.0, 0.22 / mul);
+    osc.frequency.value = base * ratios[i];
+    const g = expDecay(2.2 + i * 0.1, amps[i]);
     osc.connect(g).connect(sfxGain);
     osc.start();
-    osc.stop(ctx.currentTime + 1.3);
+    osc.stop(ctx.currentTime + 2.6);
   }
 }
 
-/** Deep drum thud on combo break. */
+/** Combo break — funeral gong, thick and crushing. */
 export function sfxComboBreak(): void {
-  playTone(120, 0.4, 'sine', 0.55, 40);
-  playNoise(0.1, 'lowpass', 200, 1, 0.2);
+  if (!ctx || !sfxGain) return;
+  subThud(44, 0.6, 0.8);
+  // Cluster of dissonant tones.
+  [78, 83, 112].forEach((f, i) => {
+    const osc = ctx!.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = f;
+    const g = expDecay(0.9 + i * 0.1, 0.2);
+    osc.connect(g).connect(sfxGain!);
+    osc.start();
+    osc.stop(ctx!.currentTime + 1.2);
+  });
+  noise(0.35, 'lowpass', 280, 1, 0.22);
 }
 
-/** Player hit — meaty thud. */
+/** Player hit — wet organic flesh thud. */
 export function sfxPlayerHit(): void {
-  playTone(70, 0.3, 'sine', 0.8, 35);
-  playNoise(0.18, 'lowpass', 500, 1.5, 0.35);
+  subThud(58, 0.28, 0.75);
+  noise(0.22, 'lowpass', 480, 1.6, 0.35);
+  noise(0.12, 'bandpass', 1400, 2, 0.15);  // wet top
 }
 
-/** Bonfire lit — classic chime. */
+/** Bonfire lit — soft crackle + warm distant hum. No bright chime. */
 export function sfxBonfire(): void {
   if (!ctx || !sfxGain) return;
-  const freqs = [523.25, 659.25, 783.99];  // C5 E5 G5
-  freqs.forEach((f, i) => {
-    window.setTimeout(() => {
-      const osc = ctx!.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = f;
-      const g = envGain(0.02, 0.4, 0.4, 1.2, 0.2);
-      osc.connect(g).connect(sfxGain!);
-      osc.start();
-      osc.stop(ctx!.currentTime + 1.7);
-    }, i * 120);
+  noise(1.4, 'bandpass', 900, 8, 0.08);     // crackle
+  // Warm mystic drone — root + perfect fifth (restful).
+  [98, 147].forEach(f => {
+    const osc = ctx!.createOscillator();
+    osc.type = 'sine'; osc.frequency.value = f;
+    const g = expDecay(2.0, 0.14);
+    osc.connect(g).connect(sfxGain!);
+    osc.start(); osc.stop(ctx!.currentTime + 2.3);
   });
 }
 
-/** Estus glug — 3 quick low bubbles. */
+/** Estus chug — gulping + breath exhale. */
 export function sfxEstus(): void {
   if (!ctx) return;
   for (let i = 0; i < 3; i++) {
-    window.setTimeout(() => playTone(180 + i * 30, 0.14, 'sine', 0.4, 120 + i * 40), i * 180);
+    window.setTimeout(() => {
+      noise(0.12, 'lowpass', 380 + i * 40, 3, 0.22, 'dry');
+      tone(110 + i * 18, 0.12, 'sine', 0.25, 'dry', 70);
+    }, i * 230);
   }
+  // Exhale at end.
+  window.setTimeout(() => noise(0.22, 'bandpass', 700, 2, 0.12, 'dry'), 700);
 }
 
-/** Dodge whoosh. */
+/** Dodge — cloth/cloak swish. */
 export function sfxDodge(): void {
-  playNoise(0.22, 'bandpass', 1600, 3, 0.25);
+  noise(0.18, 'bandpass', 1800, 4, 0.2, 'dry');
+  tone(320, 0.1, 'sine', 0.08, 'dry', 110);
 }
 
-/** Boss appears — horn blast. */
+/** Boss appears — deep evil horn + tritone drone. */
 export function sfxBossAppear(): void {
   if (!ctx || !sfxGain) return;
-  const osc = ctx.createOscillator();
+  // Tritone — root + #4 (the Devil's interval).
+  const root = 55;
+  const osc1 = ctx.createOscillator();
   const osc2 = ctx.createOscillator();
-  osc.type = 'sawtooth'; osc2.type = 'sawtooth';
-  osc.frequency.value = 110; osc2.frequency.value = 110 * 1.007;
-  const g = envGain(0.1, 0.4, 0.6, 1.5, 0.45);
+  osc1.type = 'sawtooth'; osc2.type = 'sawtooth';
+  osc1.frequency.value = root; osc2.frequency.value = root * 1.414;
   const filter = ctx.createBiquadFilter();
   filter.type = 'lowpass';
-  filter.frequency.value = 900;
-  osc.connect(filter); osc2.connect(filter);
+  filter.frequency.setValueAtTime(220, ctx.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(900, ctx.currentTime + 1.2);
+  filter.Q.value = 6;
+  const g = env(0.25, 0.5, 0.5, 1.6, 0.55);
+  osc1.connect(filter); osc2.connect(filter);
   filter.connect(g).connect(sfxGain);
-  osc.start(); osc2.start();
-  osc.stop(ctx.currentTime + 2); osc2.stop(ctx.currentTime + 2);
+  osc1.start(); osc2.start();
+  const stopAt = ctx.currentTime + 2.5;
+  osc1.stop(stopAt); osc2.stop(stopAt);
+  // Low hit underneath.
+  subThud(36, 1.2, 0.7);
 }
 
-/** Boss defeated — orchestral stinger. */
+/** Boss defeated — dissonant chord resolving inward, long tail. */
 export function sfxBossDefeated(): void {
-  if (!ctx) return;
-  const notes = [196, 246.94, 293.66, 392];  // G3 B3 D4 G4
-  notes.forEach((f, i) => {
-    window.setTimeout(() => playTone(f, 0.8, 'triangle', 0.35, f), i * 110);
+  if (!ctx || !sfxGain) return;
+  // Minor chord with sliding top to major third — relief after horror.
+  const chord = [110, 131, 156];
+  chord.forEach((f, i) => {
+    const osc = ctx!.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = f;
+    if (i === 2) {
+      // Top note glides up 20 cents at the end — resolution.
+      osc.frequency.setValueAtTime(f, ctx!.currentTime + 0.2);
+      osc.frequency.linearRampToValueAtTime(f * 1.012, ctx!.currentTime + 1.2);
+    }
+    const g = expDecay(3.0 + i * 0.1, 0.28);
+    osc.connect(g).connect(sfxGain!);
+    osc.start(); osc.stop(ctx!.currentTime + 3.4);
   });
+  subThud(52, 1.2, 0.5);
 }
 
-/** Death stinger. */
+/** Death — descending dissonant wail, long bleed. */
 export function sfxDeath(): void {
-  playTone(440, 1.8, 'triangle', 0.5, 55);
-  playNoise(1.2, 'lowpass', 300, 1, 0.25);
+  if (!ctx || !sfxGain) return;
+  const osc1 = ctx.createOscillator();
+  const osc2 = ctx.createOscillator();
+  osc1.type = 'sawtooth'; osc2.type = 'sawtooth';
+  osc1.frequency.setValueAtTime(330, ctx.currentTime);
+  osc1.frequency.exponentialRampToValueAtTime(55, ctx.currentTime + 2.2);
+  osc2.frequency.setValueAtTime(330 * 1.059, ctx.currentTime);     // minor 2nd above
+  osc2.frequency.exponentialRampToValueAtTime(55 * 1.059, ctx.currentTime + 2.2);
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(1400, ctx.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(220, ctx.currentTime + 2.2);
+  const g = expDecay(2.4, 0.45);
+  osc1.connect(filter); osc2.connect(filter);
+  filter.connect(g).connect(sfxGain);
+  osc1.start(); osc2.start();
+  osc1.stop(ctx.currentTime + 2.6); osc2.stop(ctx.currentTime + 2.6);
+  noise(1.5, 'lowpass', 280, 1, 0.22);
 }
 
-/** Heartbeat — played every 0.9s when low HP. Call each frame; self-throttles. */
+/** Heartbeat — double sub-thump; self-throttled. Call each frame. */
 export function sfxHeartbeat(now: number): void {
   if (!ctx) return;
   if (now - lastHeartbeatAt < 900) return;
   lastHeartbeatAt = now;
-  playTone(55, 0.14, 'sine', 0.55, 40);
-  window.setTimeout(() => playTone(55, 0.14, 'sine', 0.45, 38), 180);
+  subThud(50, 0.14, 0.6);
+  window.setTimeout(() => subThud(50, 0.14, 0.5), 180);
 }
 
 // ─────────────────────────────────────────────────────────────
-// Music drone — one layer per zone, cross-fade on switch.
+// Music — dark dissonant drone per zone.
+// Three detuned saws: root + flat-5th + octave, low-pass + slow LFO on cutoff.
 // ─────────────────────────────────────────────────────────────
 
-type DroneConfig = {root: number; cutoff: number; lfoRate: number; detune: number};
+type DroneConfig = {root: number; interval: number; cutoff: number; lfoRate: number; detune: number};
 const DRONES: Record<string, DroneConfig> = {
-  firelink:  {root: 55,  cutoff: 520, lfoRate: 0.08, detune: 7},
-  burg:      {root: 65,  cutoff: 680, lfoRate: 0.11, detune: 12},
-  anorlondo: {root: 82,  cutoff: 900, lfoRate: 0.06, detune: 4},
-  kiln:      {root: 49,  cutoff: 420, lfoRate: 0.14, detune: 18},
-  boss:      {root: 41,  cutoff: 520, lfoRate: 0.25, detune: 22},
-  victory:   {root: 98,  cutoff: 1200, lfoRate: 0.05, detune: 2},
-  menu:      {root: 61,  cutoff: 600, lfoRate: 0.05, detune: 5},
+  menu:      {root: 58,  interval: 1.498, cutoff: 520, lfoRate: 0.05, detune: 6},
+  firelink:  {root: 55,  interval: 1.498, cutoff: 520, lfoRate: 0.06, detune: 7},
+  burg:      {root: 62,  interval: 1.189, cutoff: 620, lfoRate: 0.09, detune: 12},   // minor 3rd: grim
+  anorlondo: {root: 82,  interval: 1.498, cutoff: 900, lfoRate: 0.05, detune: 4},    // majestic
+  kiln:      {root: 46,  interval: 1.414, cutoff: 420, lfoRate: 0.12, detune: 18},   // tritone: horror
+  boss:      {root: 41,  interval: 1.414, cutoff: 520, lfoRate: 0.22, detune: 22},   // tritone: dread
+  victory:   {root: 98,  interval: 1.498, cutoff: 1100, lfoRate: 0.05, detune: 2},
 };
 
 export function playMusic(id: keyof typeof DRONES): void {
@@ -271,14 +384,16 @@ export function playMusic(id: keyof typeof DRONES): void {
   const cfg = DRONES[id];
   const osc1 = ctx.createOscillator();
   const osc2 = ctx.createOscillator();
-  osc1.type = 'sawtooth'; osc2.type = 'sawtooth';
+  const osc3 = ctx.createOscillator();
+  osc1.type = 'sawtooth'; osc2.type = 'sawtooth'; osc3.type = 'triangle';
   osc1.frequency.value = cfg.root;
   osc2.frequency.value = cfg.root;
   osc2.detune.value = cfg.detune;
+  osc3.frequency.value = cfg.root * cfg.interval;     // dissonant third voice
   const filter = ctx.createBiquadFilter();
   filter.type = 'lowpass';
   filter.frequency.value = cfg.cutoff;
-  filter.Q.value = 3;
+  filter.Q.value = 3.5;
   const lfo = ctx.createOscillator();
   const lfoGain = ctx.createGain();
   lfo.frequency.value = cfg.lfoRate;
@@ -286,12 +401,13 @@ export function playMusic(id: keyof typeof DRONES): void {
   lfo.connect(lfoGain).connect(filter.frequency);
   const gain = ctx.createGain();
   gain.gain.setValueAtTime(0, ctx.currentTime);
-  gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + 2.0);
+  gain.gain.linearRampToValueAtTime(0.38, ctx.currentTime + 2.2);
   osc1.connect(filter);
   osc2.connect(filter);
+  osc3.connect(filter);
   filter.connect(gain).connect(musicGain);
-  osc1.start(); osc2.start(); lfo.start();
-  activeMusic = {osc1, osc2, lfo, filter, gain};
+  osc1.start(); osc2.start(); osc3.start(); lfo.start();
+  activeMusic = {osc1, osc2, osc3, lfo, filter, gain};
   currentMusicId = id;
 }
 
@@ -303,35 +419,7 @@ export function stopMusic(fade: number = 0.8): void {
   m.gain.gain.setValueAtTime(m.gain.gain.value, now);
   m.gain.gain.linearRampToValueAtTime(0, now + fade);
   const stopAt = now + fade + 0.05;
-  m.osc1.stop(stopAt); m.osc2.stop(stopAt); m.lfo.stop(stopAt);
+  m.osc1.stop(stopAt); m.osc2.stop(stopAt); m.osc3.stop(stopAt); m.lfo.stop(stopAt);
   activeMusic = null;
   currentMusicId = null;
-}
-
-// ─────────────────────────────────────────────────────────────
-// Whispers — Web Speech API. Rate-limited.
-// ─────────────────────────────────────────────────────────────
-
-export function whisperWord(text: string, now: number): void {
-  const s = getSettings();
-  if (!s.whispers || s.volumeVoice <= 0.01) return;
-  if (now - lastWhisperAt < 700) return;
-  lastWhisperAt = now;
-  try {
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 0.75;
-    u.pitch = 0.3;
-    u.volume = s.volumeVoice * s.volumeMaster * 0.9;
-    // Prefer a deep voice if available.
-    const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v => /male|david|daniel/i.test(v.name)) ?? voices[0];
-    if (preferred) u.voice = preferred;
-    window.speechSynthesis.speak(u);
-  } catch {
-    /* speech synthesis unavailable */
-  }
-}
-
-export function cancelWhispers(): void {
-  try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
 }
